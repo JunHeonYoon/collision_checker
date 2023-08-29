@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="panda">
+
+  <xacro:arg name="arm_id_1" default="panda_1" />
+  <xacro:arg name="arm_id_2" default="panda_2" />
+  <xacro:arg name="hand" default="true" />
+  
+  <!-- box shaped table as base for the Panda -->
+  <link name="base">
+    <visual>
+      <origin xyz="0 0 0.5" rpy="0 0 0"/>
+      <geometry>
+        <box size="2.7 1.2 1" />
+      </geometry>
+      <material name="White">
+        <color rgba="1.0 1.0 1.0 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.5" rpy="0 0 0  "/>
+      <geometry>
+        <box size="2.7 1.2 1" />
+      </geometry>
+    </collision>
+  </link>
+
+  <!-- single arm with gripper -->
+  <xacro:include filename="$(find franka_description)/robots/common/franka_arm.xacro"/>
+  <xacro:franka_arm arm_id="$(arg arm_id_1)" connected_to="base"  xyz="-0.6 0 1.006" gazebo="true"
+                    joint_limits="${xacro.load_yaml('$(find franka_description)/robots/panda/joint_limits.yaml')}"/>
+  <xacro:if value="$(arg hand)">
+      <xacro:include filename="$(find franka_description)/robots/common/franka_hand.xacro"/>
+      <xacro:franka_hand
+          arm_id="$(arg arm_id_1)"
+          rpy="0 0 ${-pi/4}"
+          connected_to="$(arg arm_id_1)_link8"
+          safety_distance="0.03"
+          gazebo="true"
+       />
+    </xacro:if>
+  <xacro:franka_arm arm_id="$(arg arm_id_2)" connected_to="base"  xyz="0.6 0 1.006" rpy="0 0 3.14159" gazebo="true"
+                    joint_limits="${xacro.load_yaml('$(find franka_description)/robots/panda/joint_limits.yaml')}"/>
+  <xacro:if value="$(arg hand)">
+      <xacro:include filename="$(find franka_description)/robots/common/franka_hand.xacro"/>
+      <xacro:franka_hand
+          arm_id="$(arg arm_id_2)"
+          rpy="0 0 ${-pi/4}"
+          connected_to="$(arg arm_id_2)_link8"
+          safety_distance="0.03"
+          gazebo="true"
+       />
+    </xacro:if>
+</robot>

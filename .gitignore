@@ -1,0 +1,8 @@
+/.vscode
+*.pyc
+__pycache__/
+data_gen/data/
+neural_network/dataset/
+neural_network/log
+neural_network/model/
+test.py

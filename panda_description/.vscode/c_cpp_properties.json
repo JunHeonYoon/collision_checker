@@ -1,0 +1,28 @@
+{
+  "configurations": [
+    {
+      "browse": {
+        "databaseFilename": "${default}",
+        "limitSymbolsToIncludedHeaders": false
+      },
+      "includePath": [
+        "/home/yoonjunheon/catkin_ws/devel/include/**",
+        "/opt/ros/noetic/include/**",
+        "/opt/openrobots/include/**",
+        "/home/yoonjunheon/catkin_ws/src/franka_ros/franka_control/include/**",
+        "/home/yoonjunheon/catkin_ws/src/franka_ros/franka_example_controllers/include/**",
+        "/home/yoonjunheon/catkin_ws/src/franka_ros/franka_gazebo/include/**",
+        "/home/yoonjunheon/catkin_ws/src/franka_ros/franka_gripper/include/**",
+        "/home/yoonjunheon/catkin_ws/src/franka_ros/franka_hw/include/**",
+        "/home/yoonjunheon/catkin_ws/src/gl_depth_sim/gl_depth_sim/include/**",
+        "/usr/include/**"
+      ],
+      "name": "ROS",
+      "intelliSenseMode": "gcc-x64",
+      "compilerPath": "/usr/bin/gcc",
+      "cStandard": "gnu11",
+      "cppStandard": "c++14"
+    }
+  ],
+  "version": 4
+}

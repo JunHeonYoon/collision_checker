@@ -1,0 +1,22 @@
+<launch>
+  <arg name="load_robot_description" default="true"/>
+  <arg name="use_rviz" default="true" />
+  <arg name="use_gui" default="false" />
+  <arg name="is_single" default="true"/>
+  <arg name="rvizconfig" default="$(find panda_description)/config/config.rviz" />
+
+  
+  <!-- load URDF, SRDF and joint_limits configuration -->
+  <include file="$(dirname)/planning_context.launch">
+    <arg name="load_robot_description" value="$(arg load_robot_description)" />
+    <arg name="is_single" value="$(arg is_single)"/>
+  </include>
+
+  <!-- Given the published joint states, publish tf for the robot links -->
+  <node if="$(arg use_gui)" name="joint_state_publisher" pkg="joint_state_publisher_gui" type="joint_state_publisher_gui" />
+  <node unless="$(arg use_gui)" name="joint_state_publisher" pkg="joint_state_publisher" type="joint_state_publisher" />
+  <node name="robot_state_publisher" pkg="robot_state_publisher" type="robot_state_publisher" />
+
+  <node name="rviz" pkg="rviz" type="rviz" args="-d $(arg rvizconfig)" required="true" if="$(arg use_rviz)" />
+
+</launch>

@@ -1,0 +1,16 @@
+<launch>
+  <arg name="load_robot_description" default="false"/>
+  <arg name="is_single" default="true"/>
+
+  <arg name="robot_description" default="robot_description"/>
+
+  <group if="$(arg is_single)">
+    <param if="$(arg load_robot_description)" name="$(arg robot_description)" command="xacro '$(find panda_description)/env_description/robots/single_arm.urdf.xacro'"/>
+    <param name="$(arg robot_description)_semantic" textfile="$(find panda_description)/config/single_panda.srdf" />
+  </group>
+
+  <group unless="$(arg is_single)">
+    <param if="$(arg load_robot_description)" name="$(arg robot_description)" command="xacro '$(find panda_description)/env_description/robots/dual_arm.urdf.xacro'"/>
+    <param name="$(arg robot_description)_semantic" textfile="$(find panda_description)/config/dual_panda.srdf" />
+  </group>
+</launch>
