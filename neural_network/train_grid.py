@@ -8,12 +8,15 @@ import pickle
 import numpy as np
 from models_grid import CollNet
 import datetime as dt
+import shutil
 
 from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
+import tqdm
 
-NUM_QSET = 5000
-NUM_ENVSET = 500
+NUM_QSET = 10000
+NUM_ENVSET = 100
+NUM_LINK = 9
 
 class CollisionNetDataset(Dataset):
     """
@@ -33,6 +36,7 @@ class CollisionNetDataset(Dataset):
             return dataset['nerf_q'], dataset['grid'], dataset['coll']
         self.nerf_q, self.grid, self.coll = data_load()
         print ('grid shape', self.grid.shape)
+        print('coll_shape', self.coll.shape)
 
     def __len__(self):
         return len(self.nerf_q)
@@ -52,11 +56,12 @@ class CollisionNetDataset(Dataset):
 
 def main(args):
     vae_latent_size = args.vae_latent_size
+    train_ratio = 0.5
+    test_ratio = 0.001
+    val_ratio = 1 - train_ratio - test_ratio
     
-    # link_num = args.link_num
-
     date = dt.datetime.now()
-    data_dir = "{}_{}_{}_{}_{}_{}/".format(date.year, date.month, date.day, date.hour, date.minute,date.second)
+    data_dir = "{:04d}_{:02d}_{:02d}_{:02d}_{:02d}_{:02d}/".format(date.year, date.month, date.day, date.hour, date.minute,date.second)
     log_dir = 'log/grid/' + data_dir
     chkpt_dir = 'model/checkpoints/grid/' + data_dir
     model_dir = 'model/grid/' + data_dir
@@ -64,17 +69,28 @@ def main(args):
     if not os.path.exists(log_dir): os.makedirs(log_dir)
     if not os.path.exists(chkpt_dir): os.makedirs(chkpt_dir)
     if not os.path.exists(model_dir): os.makedirs(model_dir)
+
+    folder_path = 'model/checkpoints/grid/'
+    num_save = 3
+    order_list = sorted(os.listdir(folder_path), reverse=True)
+    remove_folder_list = order_list[num_save:]
+    for rm_folder in remove_folder_list:
+        shutil.rmtree('log/grid/'+rm_folder)
+        shutil.rmtree('model/checkpoints/grid/'+rm_folder)
+        shutil.rmtree('model/grid/'+rm_folder)
     
     suffix = 'lat{}_rnd{}'.format(vae_latent_size, args.seed)
 
-    file_name = "dataset/box_grid_16.pickle"
+    file_name = "dataset/2023_09_02_05_14_20/box_grid.pickle"
+    # 2023_09_02_05_14_20 : 32
+    # 2023_08_24_00_43_57 : 16
     log_file_name = log_dir + 'log_{}'.format(suffix)
     model_name = '{}'.format(suffix)
 
     """
-    layer size = [21+len(z), hidden1, hidden2, 2(free / collide)]
+    layer size = [21+len(z), hidden1, hidden2, num_links(possibility to collide)]
     """
-    layer_size = [21+vae_latent_size, 255, 255, 2]
+    layer_size = [21+vae_latent_size, 256, 256, NUM_LINK]
 
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
@@ -90,9 +106,10 @@ def main(args):
     dataset = CollisionNetDataset(
         file_name=file_name)
     n_grid = dataset.get_grid_len()
-    train_size = int(0.99 * len(dataset))
-    test_size = len(dataset) - train_size
-    train_dataset, test_dataset = torch.utils.data.random_split(dataset, [train_size, test_size])
+    train_size = int(train_ratio * len(dataset))
+    test_size = int(test_ratio * len(dataset))
+    val_size = int(val_ratio * len(dataset))
+    train_dataset, test_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, test_size, val_size])
     # train_dataset = torch.utils.data.Subset(dataset, range(0,train_size))
     # test_dataset = torch.utils.data.Subset(dataset, range(train_size, train_size+test_size))
     train_data_loader = DataLoader(
@@ -105,36 +122,64 @@ def main(args):
     print('[data len] total: {} train: {}, test: {}'.format(len(dataset), len(train_dataset), len(test_dataset)))
     
     def loss_fn_vae(recon_x, x, mean, log_var):
-        BCE = torch.nn.functional.binary_cross_entropy(
+        BCE = torch.nn.functional.binary_cross_entropy_with_logits(
             recon_x.view(-1, n_grid, n_grid, n_grid), x.view(-1, n_grid, n_grid, n_grid), reduction='sum')
         KLD = -0.5 * torch.sum(1 + log_var - mean.pow(2) - log_var.exp())
         return (BCE + KLD) / x.size(0)
 
-    def loss_fn_fc(y_hat, y):
-        CE = torch.nn.CrossEntropyLoss(reduction="mean")
-        loss = CE(y_hat, y)
-        return loss
+
+    def loss_fn_fc(coll_hat, coll):
+        weights = [1, 2, 3, 4, 5, 6, 7, 8, 8]
+        weights = [i / sum(weights) for i in weights]
+        weights = torch.Tensor(weights).to(device)
+        # BCE = torch.nn.BCEWithLogitsLoss(reduction="sum", weight=weights)
+        # loss = BCE(coll_hat, coll) / coll.size(0)
+        BCE = torch.nn.functional.binary_cross_entropy_with_logits(coll_hat, coll, weight=weights, reduction="sum")
+        return BCE / coll.size(0)
     
     NN_param = {}
     NN_param["input_data_shape"] = {"channel": 1, "shape":[n_grid, n_grid, n_grid]}
-    NN_param["encoder_layer"] = [{"type": "Conv",    "in_channel": 1, "out_channel": 4, "kernel_size": 3, "stride": 1},
+
+    # for num_grid = 16 
+    # NN_param["encoder_layer"] = [{"type": "Conv",    "in_channel": 1, "out_channel": 4, "kernel_size": 3, "stride": 1},
+    #                              {"type": "Relu"},
+    #                             #  {"type": "Maxpool",                                    "kernel_size": 2, "stride": 2},
+    #                              {"type": "Conv",    "in_channel": 4, "out_channel": 8, "kernel_size": 2, "stride": 2},
+    #                              {"type": "Relu"},
+    #                             #  {"type": "Maxpool",                                    "kernel_size": 2, "stride": 2},
+    #                              {"type": "Flatten", "in_features":[8,7,7,7]},
+    #                              {"type": "Linear", "in_features": int(8*7*7*7), "out_features": 256},
+    #                              {"type": "Relu"}]
+    # NN_param["decoder_layer"] = [{"type": "Relu"},
+    #                              {"type": "Linear", "in_features": 256,          "out_features": int(8*7*7*7)},
+    #                              {"type": "Unflatten", "out_features": [8,7,7,7]},
+    #                             #  {"type": "Maxunpool",                                    "kernel_size": 2, "stride": 2},
+    #                              {"type": "Relu"},
+    #                              {"type": "Transconv", "in_channel": 8, "out_channel": 4, "kernel_size": 2, "stride": 1},
+    #                             #  {"type": "Maxunpool",                                    "kernel_size": 2, "stride": 2},
+    #                              {"type": "Relu"},
+    #                              {"type": "Transconv", "in_channel": 4, "out_channel": 1, "kernel_size": 3, "stride": 1}]
+    
+    # for num_grid = 32
+    NN_param["encoder_layer"] = [{"type": "Conv",    "in_channel": 1, "out_channel": 8, "kernel_size": 3, "stride": 1, "padding": 0},
                                  {"type": "Relu"},
-                                 {"type": "Maxpool",                                    "kernel_size": 2, "stride": 2},
-                                 {"type": "Conv",    "in_channel": 4, "out_channel": 8, "kernel_size": 2, "stride": 1},
+                                 {"type": "Maxpool",                                     "kernel_size": 2, "stride": 2, "padding": 0},
+                                 {"type": "LocalRespNorm", "size":2},
+                                 {"type": "Conv",    "in_channel": 8, "out_channel": 16, "kernel_size": 3, "stride": 2, "padding": 0},
                                  {"type": "Relu"},
-                                 {"type": "Maxpool",                                    "kernel_size": 2, "stride": 2},
-                                 {"type": "Flatten", "in_features":[8,3,3,3]},
-                                 {"type": "Linear", "in_features": int(8*3*3*3), "out_features": 128},
+                                #  {"type": "Maxpool",                                    "kernel_size": 2, "stride": 2, "padding": 0},
+                                 {"type": "Flatten", "in_features":[16,7,7,7]},
+                                 {"type": "Linear", "in_features": int(16*7*7*7), "out_features": 1024},
                                  {"type": "Relu"}]
     NN_param["decoder_layer"] = [{"type": "Relu"},
-                                 {"type": "Linear", "in_features": 128,          "out_features": int(8*3*3*3)},
-                                 {"type": "Unflatten", "out_features": [8,3,3,3]},
-                                 {"type": "Maxunpool",                                    "kernel_size": 2, "stride": 2},
+                                 {"type": "Linear", "in_features": 1024,          "out_features": int(16*7*7*7)},
+                                 {"type": "Unflatten", "out_features": [16,7,7,7]},
+                                #  {"type": "Maxunpool",                                    "kernel_size": 2, "stride": 2, "padding": 0},
                                  {"type": "Relu"},
-                                 {"type": "Transconv", "in_channel": 8, "out_channel": 4, "kernel_size": 2, "stride": 1},
-                                 {"type": "Maxunpool",                                    "kernel_size": 2, "stride": 2},
+                                 {"type": "Transconv", "in_channel": 16, "out_channel": 4, "kernel_size": 3, "stride": 2, "padding": 0}, 
+                                #  {"type": "Maxunpool",                                    "kernel_size": 2, "stride": 2, "padding": 0},
                                  {"type": "Relu"},
-                                 {"type": "Transconv", "in_channel": 4, "out_channel": 1, "kernel_size": 3, "stride": 1}]
+                                 {"type": "Transconv", "in_channel": 4, "out_channel": 1, "kernel_size": 4, "stride": 2, "padding": 0}]
     NN_param["fc_layer"] = layer_size
     NN_param["latent_size"] = vae_latent_size
 
@@ -150,115 +195,143 @@ def main(args):
         pickle.dump(NN_param,f)
 
     optimizer = torch.optim.Adam(collnet.parameters(), lr=args.learning_rate, weight_decay=1e-5)
+    # optimizer = torch.optim.AdamW(collnet.parameters(), lr=args.learning_rate)
 
-    logs = defaultdict(list)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3,
+                                                        threshold=0.00001, threshold_mode='rel',
+                                                        cooldown=0, min_lr=0, eps=1e-08, verbose=True)
+    scaler = torch.cuda.amp.GradScaler(enabled=True)
+
     # clear log
     with open(log_file_name, 'w'):
         pass
+
     min_loss = 1e100
-    for iteration, (grid, nerf_q, coll) in enumerate(test_data_loader):
-        test_nerf_q, test_grid, test_coll = nerf_q.to(device).squeeze(), grid.to(device), coll.type(torch.LongTensor).to(device).squeeze()
+    e_notsaved = 0
+
+
+
+
+    for grid, nerf_q, coll in test_data_loader:
+        test_nerf_q, test_grid, test_coll = nerf_q.to(device).squeeze(), grid.to(device), coll.to(device).squeeze()
+
     for epoch in range(args.epochs):
-        collnet.train()
+        loader_tqdm = tqdm.tqdm(train_data_loader)
 
-        for iteration, (grid, nerf_q, coll) in enumerate(train_data_loader):
-            nerf_q, grid, coll = nerf_q.to(device).squeeze(), grid.to(device), coll.type(torch.LongTensor).to(device).squeeze()
+        for grid, nerf_q, coll in loader_tqdm:
+            nerf_q, grid, coll = nerf_q.to(device).squeeze(), grid.to(device), coll.to(device).squeeze()
             
-            x_q = nerf_q
-            x_g = grid
-            y = coll
+            collnet.train()
+        
+            with torch.cuda.amp.autocast():
+                coll_hat, x_voxel, recon_x, mean, log_var = collnet.forward(nerf_q, grid)
+                # coll_hat = coll_hat.view(-1, NUM_LINK)
 
-            y_hat, x_voxel, recon_x, mean, log_var = collnet(x_q, x_g)
+                loss_vae_train = loss_fn_vae(recon_x, x_voxel, mean, log_var) / n_grid**3
+                loss_fc_train = loss_fn_fc(coll_hat, coll)
+                loss_train = loss_vae_train + loss_fc_train
 
-            loss_vae = loss_fn_vae(recon_x, x_voxel, mean, log_var) / n_grid**3
-            loss_fc = loss_fn_fc(y_hat.view(-1,2), y) # sum -> mean, divison remove
-
-            loss = loss_vae + loss_fc
-
+            scaler.scale(loss_train).backward()
+            scaler.step(optimizer)
+            print(loss_train)
+            scaler.update()
             optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            # loss_train.backward()
+            # optimizer.step()
 
-            logs['loss'].append(loss.item())
+            coll_hat_bin = (coll_hat > 0.5).type(torch.int32)
+            coll_bin = coll.type(torch.int32)
 
-            if iteration % args.print_every == 0 or iteration == len(train_data_loader)-1:
-                print("======================================================================")
-                print("[Train] Epoch {:02d}/{:02d} Batch {:04d}/{:d}, Loss {:9.4f}".format(
-                    epoch, args.epochs, iteration, len(train_data_loader)-1, loss.item()))
+            train_accuracy = []
+            for link in range(NUM_LINK):
+                train_accuracy.append( (coll_bin == coll_hat_bin).sum(dim=0)[link].item() / coll.size(dim=0) )
 
-                _, y_hat_bin = torch.max(y_hat, dim=1)
-                y_bin = y
+            # train_accuracy_all = sum(train_accuracy) / NUM_LINK
 
-                train_accuracy = (y_bin == y_hat_bin).sum().item()
-                
-                with torch.no_grad():
-                    # x = torch.cat([test_nerf_q,test_grid], dim=1)
-                    x_q = test_nerf_q
-                    x_g = test_grid
-                    y = test_coll
-                    collnet.eval()
-                    y_hat, x_voxel, recon_x, mean, log_var = collnet(x_q, x_g)
 
-                    loss_vae_test = loss_fn_vae(recon_x, x_voxel, mean, log_var) / n_grid**3
-                    loss_fc_test = loss_fn_fc(y_hat.view(-1,2), y)
+            
+        collnet.eval()
+        with torch.cuda.amp.autocast() and torch.no_grad():
+            coll_hat, x_voxel, recon_x, mean, log_var = collnet.forward(test_nerf_q, test_grid)
 
-                    loss_test = loss_vae_test + loss_fc_test
-                    
-                    _, y_hat_bin = torch.max(y_hat, dim=1)
-                    y_bin = (y)
+            loss_vae_test = loss_fn_vae(recon_x, x_voxel, mean, log_var) / n_grid**3
+            loss_fc_test = loss_fn_fc(coll_hat, test_coll)
+            loss_test = loss_vae_test + loss_fc_test
 
-                    truth_positives = (y_bin == 1).sum().item() 
-                    truth_negatives = (y_bin == 0).sum().item() 
+        coll_hat_bin = (coll_hat > 0.5).type(torch.int32)
+        coll_bin = test_coll.type(torch.int32)
 
-                    confusion_vector = y_hat_bin / y_bin
-                    
-                    true_positives = torch.sum(confusion_vector == 1).item()
-                    false_positives = torch.sum(confusion_vector == float('inf')).item()
-                    true_negatives = torch.sum(torch.isnan(confusion_vector)).item()
-                    false_negatives = torch.sum(confusion_vector == 0).item()
+        test_accuracy = []
+        accuracy = []
 
-                    test_accuracy = (y_bin == y_hat_bin).sum().item()
-                    accuracy = {}
-                    accuracy['tp'] = true_positives / truth_positives
-                    accuracy['fp'] = false_positives / truth_negatives
-                    accuracy['tn'] = true_negatives / truth_negatives
-                    accuracy['fn'] = false_negatives / truth_positives
+        for link in range(NUM_LINK):
+            test_accuracy.append( (coll_bin == coll_hat_bin).sum(dim=0)[link].item() / test_coll.size(dim=0) )
 
-                lv = loss_vae_test.item()
-                lf = loss_fc_test.item()
-                lt = loss_test.item()
+            truth_positives = (coll_bin == 1).sum(dim=0)[link].item() 
+            truth_negatives = (coll_bin == 0).sum(dim=0)[link].item() 
 
-                lv0 = loss_vae.item()
-                lf0 = loss_fc.item()
-                lt0 = loss.item()
-                train_accuracy = float(train_accuracy)/coll.size(dim=0)
-                test_accuracy = float(test_accuracy)/test_nerf_q.size(dim=0)
-                print("[Test] vae loss: {:.3f} fc loss: {:.3f} total loss: {:.3f}".format(lv,lf,lt))
-                print("[Test] Accuracy: Train: {} / Test: {}".format(train_accuracy, test_accuracy))
-                print("y    : {}".format(y_bin[0:10]))
-                print("y_hat: {}".format(y_hat_bin[0:10]))
-                print("======================================================================")
-                    
-                if lt < min_loss:
-                    min_loss = loss.item()
-                    
-                    checkpoint_model_name = chkpt_dir + 'loss_{}_{}_checkpoint_{:02d}_{:04d}_{:.4f}_{}_grid'.format(lt, model_name, epoch, iteration, vae_latent_size, args.seed) + '.pkl'
-                    torch.save(collnet.state_dict(), checkpoint_model_name)
+            confusion_vector = (coll_hat_bin / coll_bin)[:, link]
+            
+            true_positives = torch.sum(confusion_vector == 1).item()
+            false_positives = torch.sum(confusion_vector == float('inf')).item()
+            true_negatives = torch.sum(torch.isnan(confusion_vector)).item()
+            false_negatives = torch.sum(confusion_vector == 0).item()
 
-                if iteration == 0:
-                    with open(log_file_name, 'a') as f:
-                        f.write('{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(epoch, lv,lf,lt,test_accuracy,lv0,lf0,lt0,train_accuracy,accuracy['tp'],accuracy['fp'],accuracy['tn'],accuracy['fn']))
+            accuracy.append({'tp': true_positives / truth_positives,
+                             'fp': false_positives / truth_negatives,
+                             'tn': true_negatives / truth_negatives,
+                             'fn': false_negatives / truth_positives})
+
+        if epoch == 0:
+            min_loss = loss_test
+
+        scheduler.step(loss_test)
+
+        if loss_test < min_loss:
+            e_notsaved = 0
+            print('saving model', loss_test.item())
+            checkpoint_model_name = chkpt_dir + 'loss_{}_{}_checkpoint_{:02d}_{:.4f}_{}_grid'.format(loss_test.item(), model_name, epoch, vae_latent_size, args.seed) + '.pkl'
+            torch.save(collnet.state_dict(), checkpoint_model_name)
+            min_loss = loss_test
+        print("Epoch: {} (Saved at {})".format(epoch, epoch-e_notsaved))
+        print("[Train] vae loss: {:.3f} fc loss: {:.3f} total loss: {:.3f}".format(loss_vae_train.item(),loss_fc_train.item(),loss_train.item()))
+        print("[Test]  vae loss: {:.3f} fc loss: {:.3f} total loss: {:.3f}".format(loss_vae_test.item(),loss_fc_test.item(),loss_test.item()))
+        print("[Train] Accuracy: {}".format(train_accuracy))
+        print("[Test]  Accuracy: {}".format(test_accuracy))
+        print("coll    : {}".format(coll[0]))
+        print("coll_hat: {}".format(coll_hat[0]))
+        print("=========================================================================================")
+
+        with open(log_file_name, 'a') as f:
+            f.write("Epoch: {} (Saved at {}) / Train Loss(VAE, FC, Total): {}, {}, {} / Test Loss(VAE, FC, Total): {}, {}, {} / Train Accuracy: {} / Test Accuracy: {} / TP: {} / FP: {} / TN: {} / FN: {}".format(epoch,
+                                                                                                                                                                                                                   epoch - e_notsaved,
+                                                                                                                                                                                                                   loss_vae_train,
+                                                                                                                                                                                                                   loss_fc_train,
+                                                                                                                                                                                                                   loss_train,
+                                                                                                                                                                                                                   loss_vae_test,
+                                                                                                                                                                                                                   loss_fc_test,
+                                                                                                                                                                                                                   loss_test,
+                                                                                                                                                                                                                   train_accuracy,
+                                                                                                                                                                                                                   test_accuracy,
+                                                                                                                                                                                                                   [link_acc["tp"] for link_acc in accuracy],
+                                                                                                                                                                                                                   [link_acc["fp"] for link_acc in accuracy],
+                                                                                                                                                                                                                   [link_acc["tn"] for link_acc in accuracy],
+                                                                                                                                                                                                                   [link_acc["fn"] for link_acc in accuracy]))
+            
+        e_notsaved += 1
     torch.save(collnet.state_dict(), model_dir+'ss{}.pkl'.format(model_name))
+
+
+
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--batch_size", type=int, default=5000)
-    parser.add_argument("--learning_rate", type=float, default=0.001)
-    parser.add_argument("--vae_latent_size", type=int, default=32)
-    parser.add_argument("--print_every", type=int, default=100)
-
+    parser.add_argument("--batch_size", type=int, default=2000)
+    parser.add_argument("--learning_rate", type=float, default=0.0001)
+    parser.add_argument("--vae_latent_size", type=int, default=1024)
+    
     args = parser.parse_args()
     main(args)

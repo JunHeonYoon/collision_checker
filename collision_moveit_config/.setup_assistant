@@ -1,0 +1,11 @@
+moveit_setup_assistant_config:
+  URDF:
+    package: collision_description
+    relative_path: robots/single_arm.urdf.xacro
+    xacro_args: ""
+  SRDF:
+    relative_path: config/panda.srdf
+  CONFIG:
+    author_name: YoonJunHeon
+    author_email: yoonjh98@snu.ac.kr
+    generated_timestamp: 1698279709

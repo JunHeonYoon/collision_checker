@@ -13,6 +13,7 @@ import pickle
 
 num_ob = 10
 num_grid = 32
+num_link = 9
 
 # Parameters
 workspace = np.array([0.855, 1.19]) # radius, z
@@ -34,7 +35,7 @@ vs2 = VisualSimulator(n_grid=num_grid)
 vs3 = VisualSimulator(n_grid=num_grid)
 vs4 = VisualSimulator(n_grid=num_grid)
 
-# # Create obstacles
+# Create obstacles
 # for i in range(num_ob):
 #     obs_posi_p = [random.triangular(robot_basespace[0], workspace[0]), 
 #                 random.triangular(-math.pi, math.pi), 
@@ -93,8 +94,8 @@ voxel_grid4 = voxel_grid4.reshape(num_grid, num_grid, num_grid)
 voxel_grids = np.any(np.array([voxel_grid1, voxel_grid2, voxel_grid3, voxel_grid4]), axis=0).astype(int)
 
 # NN model load
-date = "2023_8_22_16_46_39/"
-model_file_name = "loss_0.3508775234222412_lat32_rnd0_checkpoint_39_0000_32.0000_0_grid.pkl"
+date = "2023_08_26_11_34_47/"
+model_file_name = "loss_0.770163893699646_lat512_rnd0_checkpoint_04_512.0000_0_grid.pkl"
 
 model_dir = "model/checkpoints/grid/" + date + model_file_name
 param_dir = "model/grid/" + date + "model_param.pickle"
@@ -139,61 +140,75 @@ ax9.voxels(voxel_grids)
 ax9.set_title("voxel grid all", fontsize=16, fontweight='bold', pad=20)
 plt.show()
 
+plt.ion()
+fig, axs = plt.subplots(num_link, 1, figsize=(6, 2*num_link))
+lines1 = []
+lines2 = []
 
-fig, ax = plt.subplots()
-x_data = []
+for ax in axs:
+    line1, = ax.plot([],[], label='ans', color="blue", linewidth=4.0, linestyle='--')
+    line2, = ax.plot([],[], label='pred', color = "red", linewidth=2.0)
+    ax.legend()
+    ax.set_ylim([-0.1,1.1])
+    ax.grid()
+    lines1.append(line1)
+    lines2.append(line2)
 
-line1, = ax.plot([],[], label='ans', color="blue", linewidth=4.0, linestyle='--')
-line2, = ax.plot([],[], label='pred', color = "red", linewidth=2.0)
-# line3, = ax.plot([],[], color="black")
 
-def plt_func(frame, x_data, y_data, y_hat_data):
-    if len(x_data) > 10:
+def plt_func(fig, lines1, lines2, x_data, y_data, y_hat_data):
+    if x_data.shape[0] > 10:
         x_data = x_data[-10:]
         y_data = y_data[-10:]
         y_hat_data = y_hat_data[-10:]
-    # zero_line = np.zeros(len(x_data)).tolist()
-    line1.set_data(x_data, y_data)
-    line2.set_data(x_data, y_hat_data)
-    # line3.set_data(x_data, zero_line)
-    ax.relim()
-    ax.autoscale_view()
-    return line1, line2
+    for link, (line1, line2, ax) in enumerate(zip(lines1, lines2, axs)):
+        line1.set_data(x_data, y_data[:, link])
+        line2.set_data(x_data, y_hat_data[:, link])
+        ax.set_xlim(x_data[0], x_data[-1])
+    fig.canvas.draw()
+    fig.canvas.flush_events()
 
-y_data = []
-y_hat_data = []
+x_data = np.zeros((1,1))
+y_data = np.zeros((1, num_link))
+y_hat_data = np.zeros((1, num_link))
 
-ani = FuncAnimation(fig, plt_func, frames=np.linspace(0,1000), fargs=(x_data, y_data, y_hat_data), interval=1, blit=True)
-ax.legend()
-ax.set_ylim([-0.1,1.1])
+
 
 joint_state = panda_joint_init
-for i in range(1000):
+i=0
+for iter in range(1,100000):
     # joint_state = joint_state + np.array([0.0, 0.0, 0.0, -0.002, 0.0, 0.0, 0.0])
     joint_state = joint_limit[0] + np.random.random(7) *( joint_limit[1] - joint_limit[0] )
     pc.display(joint_state)
+    coll, dist = pc.collision_vector()
+    print(dist)
+    if dist != 0:
+        continue
     with torch.no_grad():
         model.eval()
         nerf_state = np.concatenate([joint_state, np.cos(joint_state), np.sin(joint_state)],axis=0).astype(np.float32)
         voxel_grids = voxel_grids.astype(np.float32)
         NN_output,_,_,_,_ = model(torch.from_numpy(nerf_state.reshape(1, -1)).to(device),
-                                  torch.from_numpy(voxel_grids.reshape(1,1, num_grid, num_grid, num_grid)).to(device))
+                                  torch.from_numpy(voxel_grids.reshape(1, 1, num_grid, num_grid, num_grid)).to(device))
     coll_pred = NN_output.cpu().detach().numpy()[0]
-    coll,_ = pc.collision_label()
+    coll.astype(np.int64)
+    
 
-    x_data.append(i)
-    y_data.append(coll)
-    y_hat_data.append(np.argmax(coll_pred))
+    x_data = np.append(x_data, np.array([[i]]), axis=0)
+    y_data = np.append(y_data, coll.reshape(1, num_link), axis=0)
+    y_hat_data = np.append(y_hat_data, coll_pred.reshape(1, num_link), axis=0)
+    
 
+    plt_func(fig, lines1, lines2, x_data, y_data, y_hat_data)
+    
     print("=================================")
     print(coll)
-    print(np.argmax(coll_pred))
+    print(coll_pred)
     pc.print_current_collision_infos()
     print("=================================")
-    # ani._stop = False
-    # ani._step = (i, x_data, y_data, y_hat_data)
-    plt.grid(True)
-    if coll != np.argmax(coll_pred):
-        plt.pause(5)    
+
+    if not np.array_equal(coll, coll_pred):
+        plt.pause(4.5)    
     plt.pause(0.5)
+
+    i+=1
 plt.show()
